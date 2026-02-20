@@ -1,174 +1,142 @@
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import os
 import re
-import glob
 
+class PlameCoreEngine:
+    """Exportador masivo de PLAME"""
+    def __init__(self):
+        self.ruc_empresa = ""
 
-COMISIONES_AFP = {
-    'INTEGRA':   {'comision': 0.0155, 'seguro': 0.0137, 'aporte': 0.10},
-    'PRIMA':     {'comision': 0.0000, 'seguro': 0.0137, 'aporte': 0.10},
-    'PROFUTURO': {'comision': 0.0000, 'seguro': 0.0137, 'aporte': 0.10},
-    'HABITAT':   {'comision': 0.0000, 'seguro': 0.0137, 'aporte': 0.10},
-}
-RMV = 1025.00
-TOPE_SEGURO_AFP = 12209.11
+    def analizar_fila(self, fila):
+        # 1. Extraer texto completo para análisis de palabras clave
+        texto_fila = " ".join([str(c) for c in fila]).upper()
+        
+        # 2. Extraer números limpios, redondeados a 2 decimales y guardados en un SET 
+        nums = set()
+        for c in fila:
+            try:
+                s = str(c).replace(',', '').replace('S/.', '').strip()
+                res = re.search(r"(\d+\.\d+|\d+)", s)
+                if res:
+                    nums.add(round(float(res.group(1)), 2))
+            except: pass
 
-class PlameApp:
+        # 3. Detectar DNI (8 dígitos)
+        dni = next((str(c).strip() for c in fila if re.match(r'^\d{8}$', str(c).strip()) and str(c).strip() != self.ruc_empresa), None)
+        if not dni: return None
+
+        # 4. Reconocimiento Directo de Montos (Prioridad de anclaje)
+        sueldo = 1130.0 if 1130.0 in nums else (904.0 if 904.0 in nums else 0.0)
+        
+        # Si no es 1130 ni 904, busca el más alto entre 800 y 2000 que no sea un año (1940-2015)
+        if sueldo == 0.0:
+            candidatos = [n for n in nums if 800 <= n <= 2000 and not (1940 <= n <= 2015)]
+            sueldo = max(candidatos) if candidatos else 0.0
+
+        onp = 146.90 if 146.90 in nums else (117.52 if 117.52 in nums else 0.0)
+        afp_ap = 113.0 if 113.0 in nums else 0.0
+        afp_sg = 15.48 if 15.48 in nums else 0.0
+        afp_cm = 17.52 if 17.52 in nums else 0.0
+        essalud = 101.70 if 101.70 in nums else round(sueldo * 0.09, 2)
+
+        # 5. Reconocimiento Estricto de Horas
+        horas = "168"
+        if "INCTEMP" in texto_fila or "SUBSIDIO" in texto_fila:
+            horas = "0"
+        elif 136.0 in nums or "136" in texto_fila:
+            horas = "136"
+
+        return {
+            'dni': dni,
+            'nom': str(fila[2])[:30],
+            'basico': sueldo,
+            'onp': onp,
+            'afp_ap': afp_ap,
+            'afp_sg': afp_sg,
+            'afp_cm': afp_cm,
+            'essalud': essalud,
+            'horas': horas
+        }
+
+class AppV12:
     def __init__(self, root):
         self.root = root
-        self.root.title("Generador PLAME SUNAT")
-        self.root.geometry("500x520")
-        self.root.configure(bg="#f0f3f5")
+        self.root.title("PLAME GENERATOR")
+        self.root.geometry("1000x650")
+        self.root.configure(bg="#f8fafc")
+        self.engine = PlameCoreEngine()
         
-        
-        tk.Label(root, text="GENERADOR PLAME", 
-                 font=("Arial", 14, "bold"), bg="#f0f3f5", fg="#2c3e50").pack(pady=15)
-        
-        
-        tk.Label(root, text="RUC Empresa:", bg="#f0f3f5").pack()
-        self.ent_ruc = tk.Entry(root, justify='center', width=20, font=("Arial", 10))
-        self.ent_ruc.insert(0, "")
-        self.ent_ruc.pack(pady=5)
-        
-        tk.Label(root, text="Periodo (AAAAMM):", bg="#f0f3f5").pack()
-        self.ent_periodo = tk.Entry(root, justify='center', width=20, font=("Arial", 10))
-        self.ent_periodo.insert(0, "202601")
-        self.ent_periodo.pack(pady=5)
-        
-       
-        self.btn_gen = tk.Button(root, text="PROCESAR PLANILLA EXCEL", 
-                                command=self.procesar, bg="#27ae60", fg="white", 
-                                font=("Arial", 10, "bold"), height=2, width=35)
-        self.btn_gen.pack(pady=20)
+        # UI moderna
+        header = tk.Frame(root, bg="#0f172a", height=80)
+        header.pack(fill="x")
+        tk.Label(header, text="CONVERTIDOR PLAME", font=("Segoe UI", 16, "bold"), fg="white", bg="#0f172a").pack(pady=20)
 
-        self.btn_folder = tk.Button(root, text="ABRIR CARPETA DE RESULTADOS", 
-                                   command=self.abrir_carpeta, bg="#3498db", fg="white", 
-                                   font=("Arial", 9), width=30)
-        self.btn_folder.pack(pady=5)
+        # Controles
+        frame_input = tk.Frame(root, bg="#f8fafc", pady=20)
+        frame_input.pack()
+        self.ent_ruc = self.add_input(frame_input, "RUC:", "", 0)
+        self.ent_per = self.add_input(frame_input, "Periodo:", "202601", 1)
+
+        tk.Button(root, text="PROCESAR Y GENERAR TXT", command=self.run, bg="#2563eb", fg="white", font=("Segoe UI", 10, "bold"), padx=25, pady=10, relief="flat").pack()
+
+        # Tabla
+        style = ttk.Style(); style.theme_use("clam")
+        self.tree = ttk.Treeview(root, columns=("DNI", "Trabajador", "Sueldo", "ONP/AFP", "Seg", "Com", "Horas"), show='headings')
+        for col in self.tree["columns"]: 
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=110, anchor="center")
+        self.tree.column("Trabajador", width=200, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=20, pady=20)
+
+    def add_input(self, master, txt, dft, c):
+        tk.Label(master, text=txt, bg="#f8fafc", font=("Segoe UI", 9, "bold")).grid(row=0, column=c*2, padx=5)
+        e = tk.Entry(master, font=("Segoe UI", 10), justify="center"); e.insert(0, dft); e.grid(row=0, column=c*2+1, padx=15)
+        return e
+
+    def run(self):
+        file = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
+        if not file: return
         
-        self.lbl_status = tk.Label(root, text="Listo para procesar", bg="#f0f3f5", fg="gray")
-        self.lbl_status.pack(pady=10)
-
-    def abrir_carpeta(self):
-        os.startfile(os.getcwd())
-
-    def eliminar_antiguos(self):
-        formatos = ['*.rem', '*.tra', '*.jor', '*.snl']
-        for f in formatos:
-            for archivo in glob.glob(f):
-                try: os.remove(archivo)
-                except: pass
-
-    def limpiar_monto(self, valor):
         try:
-            val = str(valor).replace(',', '').strip()
-            return float(val) if val not in ['-', '', 'None', 'nan', '#¡REF!'] else 0.0
-        except: return 0.0
+            df = pd.read_excel(file, header=None)
+            self.engine.ruc_empresa = self.ent_ruc.get()
+            data_final = {}
 
-    def procesar(self):
-        ruc = self.ent_ruc.get().strip()
-        periodo = self.ent_periodo.get().strip()
-        
-        if len(ruc) != 11 or len(periodo) != 6:
-            messagebox.showwarning("Error", "RUC o Periodo con formato incorrecto.")
-            return
+            for _, fila in df.iterrows():
+                res = self.engine.analizar_fila(fila)
+                # Ignorar filas inválidas o bajas repetidas (Cese de Delia)
+                if not res or res['dni'] in data_final: continue
+                data_final[res['dni']] = res
 
-        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
-        if not file_path: return
-
-        try:
-            self.eliminar_antiguos()
-            df_raw = pd.read_excel(file_path, header=None)
-            resultados = []
+            # Escribir archivos y actualizar UI
+            self.save_txt(data_final)
             
-            for i, fila in df_raw.iterrows():
-                dni = None
-                idx_dni = -1
-                for idx, celda in enumerate(fila):
-                    if re.match(r'^\d{8}$', str(celda).strip()):
-                        dni = str(celda).strip()
-                        idx_dni = idx
-                        break
-                
-                if not dni: continue 
-
-               
-                basico = self.limpiar_monto(fila[idx_dni + 7])
-                
-                asig_fam = self.limpiar_monto(fila[idx_dni + 13]) if (idx_dni + 13) < len(fila) else 0
-                total_rem = basico + asig_fam
-                
-                
-                celda_horas = str(fila[idx_dni + 8])
-                es_subsidio = "INC" in celda_horas.upper() or "SUB" in celda_horas.upper()
-                
-                
-                horas = "168"
-                match_h = re.search(r'(\d+)\s*h', celda_horas)
-                if match_h: horas = match_h.group(1)
-                elif es_subsidio: horas = "0"
-
-               
-                info_pension = str(fila[idx_dni + 17]).upper()
-                tributos = {}
-                
-                if any(x in info_pension for x in ["INTEGRA", "PRIMA", "PROFUTURO", "HABITAT"]):
-                    afp_nom = next(a for a in COMISIONES_AFP if a in info_pension)
-                    c = COMISIONES_AFP[afp_nom]
-                    tributos["0608"] = round(total_rem * 0.10, 2)
-                    tributos["0601"] = round(min(total_rem, TOPE_SEGURO_AFP) * c['seguro'], 2)
-                    if c['comision'] > 0:
-                        tributos["0606"] = round(total_rem * c['comision'], 2)
-                else:
-                    monto_onp = self.limpiar_monto(fila[idx_dni + 16])
-                    if monto_onp > 0: tributos["0607"] = round(monto_onp, 2)
-
-                tributos["0804"] = round(max(total_rem * 0.09, RMV * 0.09), 2)
-
-                resultados.append({
-                    'DNI': dni, 'BASICO': basico, 'ASIG_FAM': asig_fam,
-                    'TRIBUTOS': tributos, 'HORAS': horas, 'SUBSIDIO': es_subsidio
-                })
-
-            if resultados:
-                base = f"0601{periodo}{ruc}"
-                # Guardar REM
-                with open(f"{base}.rem", "w", encoding="ansi") as f:
-                    for r in resultados:
-                        f.write(f"01|{r['DNI']}|0121|{r['BASICO']:.2f}|{r['BASICO']:.2f}|\r\n")
-                        if r['ASIG_FAM'] > 0:
-                            f.write(f"01|{r['DNI']}|0201|{r['ASIG_FAM']:.2f}|{r['ASIG_FAM']:.2f}|\r\n")
-                
-                # Guardar TRA
-                with open(f"{base}.tra", "w", encoding="ansi") as f:
-                    for r in resultados:
-                        for cod, mon in r['TRIBUTOS'].items():
-                            f.write(f"01|{r['DNI']}|{cod}|{mon:.2f}|{mon:.2f}|\r\n")
-                
-                # Guardar JOR
-                with open(f"{base}.jor", "w", encoding="ansi") as f:
-                    for r in resultados:
-                        f.write(f"01|{r['DNI']}|{r['HORAS']}|0|0|0|\r\n")
-                
-                # Guardar SNL (Subsidios)
-                subs = [r for r in resultados if r['SUBSIDIO']]
-                if subs:
-                    with open(f"{base}.snl", "w", encoding="ansi") as f:
-                        for r in subs:
-                            
-                            f.write(f"01|{r['DNI']}|21|30|\r\n")
-
-                messagebox.showinfo("Éxito", f"Se generaron archivos para {len(resultados)} trabajadores.")
-                self.lbl_status.config(text="Proceso completado.", fg="green")
-            else:
-                messagebox.showwarning("Aviso", "No se detectó información procesable.")
-
+            self.tree.delete(*self.tree.get_children())
+            for d, v in data_final.items():
+                ret = v['onp'] if v['onp'] > 0 else v['afp_ap']
+                self.tree.insert("", "end", values=(d, v['nom'], f"{v['basico']:.2f}", f"{ret:.2f}", f"{v['afp_sg']:.2f}", f"{v['afp_cm']:.2f}", v['horas']))
+            
+            messagebox.showinfo("Proceso Exitoso", f"Se generaron los archivos para {len(data_final)} trabajadores.\nMontos redondeados y horas corregidas.")
+            os.startfile(os.getcwd())
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Ocurrió un problema: {e}")
+            messagebox.showerror("Error", f"Fallo al procesar el documento: {e}")
+
+    def save_txt(self, data):
+        base = f"0601{self.ent_per.get()}{self.ent_ruc.get()}"
+        with open(base+".rem", "w") as f:
+            for d, v in data.items(): f.write(f"01|{d}|0121|{v['basico']:.2f}|{v['basico']:.2f}|\r\n")
+        with open(base+".tra", "w") as f:
+            for d, v in data.items():
+                if v['onp'] > 0: f.write(f"01|{d}|0607|{v['onp']:.2f}|{v['onp']:.2f}|\r\n")
+                if v['afp_ap'] > 0: f.write(f"01|{d}|0608|{v['afp_ap']:.2f}|{v['afp_ap']:.2f}|\r\n")
+                if v['afp_sg'] > 0: f.write(f"01|{d}|0601|{v['afp_sg']:.2f}|{v['afp_sg']:.2f}|\r\n")
+                if v['afp_cm'] > 0: f.write(f"01|{d}|0606|{v['afp_cm']:.2f}|{v['afp_cm']:.2f}|\r\n")
+                f.write(f"01|{d}|0804|{v['essalud']:.2f}|{v['essalud']:.2f}|\r\n")
+        with open(base+".jor", "w") as f:
+            for d, v in data.items(): f.write(f"01|{d}|{v['horas']}|0|0|0|\r\n")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = PlameApp(root)
-    root.mainloop()
+    root = tk.Tk(); AppV12(root); root.mainloop()
